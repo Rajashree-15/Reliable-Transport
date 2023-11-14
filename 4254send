@@ -1,0 +1,99 @@
+#!/usr/bin/python3 -u
+
+import sys
+import socket
+import time
+import datetime
+import json
+import threading
+from base64 import b64encode
+
+MSG_SIZE = 1500
+DATA_SIZE = 1000
+TIMEOUT = 100000
+SEQUENCE = 0
+COUNTDOWN_TIMER = 50  # Set your desired countdown timer in seconds
+
+# Bind to localhost and an ephemeral port
+IP_PORT = sys.argv[1]
+UDP_IP = IP_PORT[0:IP_PORT.find(":")]
+UDP_PORT = int(IP_PORT[IP_PORT.find(":")+1:])
+dest = (UDP_IP, UDP_PORT)
+
+time.sleep(0.5)
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def log(string):
+    sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " 4254send: " + string + "\n")
+
+# List to store sent packets along with their timestamps
+sent_packets_buffer = []
+
+def send_packet(packet):
+    global SEQUENCE
+    if sock.sendto(packet.encode(), dest) < len(packet):
+        log("[error] unable to fully send packet")
+    else:
+        log("[send data] " + str(SEQUENCE))
+
+def send_next_packet():
+    global SEQUENCE
+
+    # Read multiple packets and add them to the buffer
+    buffer_size = 30  # Set your desired buffer size
+    buffer = []
+    for _ in range(buffer_size):
+        data = sys.stdin.buffer.read(DATA_SIZE)
+        if len(data) > 0:
+            msg = json.dumps({"sequence": SEQUENCE, "data": b64encode(data).decode(), "ack": False, "eof": False})
+            buffer.append(msg)  # Add the packet to the buffer
+            log("[buffered data] " + str(SEQUENCE))
+            SEQUENCE += len(data)
+        else:
+            break
+
+    return buffer
+
+def send_buffer(buffer):
+    threads = []
+    for packet in buffer:
+        thread = threading.Thread(target=send_packet, args=(packet,))
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+# Send first packet and buffer the rest
+buffer = send_next_packet()
+send_buffer(buffer)
+
+# Now read in data, send packets, and handle acknowledgments
+while True:
+    log("ABOUT TO SLEEP")
+    result = sock.recvfrom(MSG_SIZE)
+
+    if result:
+        (data, addr) = result
+        try:
+            decoded = json.loads(data.decode())
+            log("[recv pkt] " + str(decoded))
+            log("[recv ack] " + str(decoded['ack']))
+
+            # If there is an ack, send the next batch of packets from the buffer
+            if decoded['ack'] == SEQUENCE:
+                buffer = send_next_packet()
+                send_buffer(buffer)
+                if not buffer:  # If the buffer is empty, break
+                    break
+
+        except (ValueError, KeyError, TypeError):
+            log("[recv corrupt packet]")
+    else:
+        log("[error] timeout")
+        sys.exit(-1)
+
+sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}).encode(), dest)
+sys.exit(0)
